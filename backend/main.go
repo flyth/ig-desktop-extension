@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
@@ -15,27 +14,20 @@ import (
 	gadgetcontext "github.com/inspektor-gadget/inspektor-gadget/pkg/gadget-context"
 	gadgetregistry "github.com/inspektor-gadget/inspektor-gadget/pkg/gadget-registry"
 	"github.com/inspektor-gadget/inspektor-gadget/pkg/gadgets"
-	"github.com/inspektor-gadget/inspektor-gadget/pkg/logger"
-	"github.com/inspektor-gadget/inspektor-gadget/pkg/operators"
-	"github.com/inspektor-gadget/inspektor-gadget/pkg/runtime"
-	"github.com/inspektor-gadget/inspektor-gadget/pkg/runtime/local"
-	"github.com/labstack/echo/middleware"
-
 	_ "github.com/inspektor-gadget/inspektor-gadget/pkg/gadgets/snapshot/process/tracer"
 	_ "github.com/inspektor-gadget/inspektor-gadget/pkg/gadgets/snapshot/socket/tracer"
+	"github.com/inspektor-gadget/inspektor-gadget/pkg/logger"
+	"github.com/inspektor-gadget/inspektor-gadget/pkg/operators"
 	_ "github.com/inspektor-gadget/inspektor-gadget/pkg/operators/localmanager"
+	"github.com/inspektor-gadget/inspektor-gadget/pkg/runtime"
+	"github.com/inspektor-gadget/inspektor-gadget/pkg/runtime/local"
 	"github.com/labstack/echo"
+	"github.com/labstack/echo/middleware"
 	"github.com/sirupsen/logrus"
 )
 
 type IGWeb struct {
 	runtime runtime.Runtime
-}
-
-type GadgetEvent struct {
-	ID      string          `json:"id"`
-	Type    uint32          `json:"type,omitempty"`
-	Payload json.RawMessage `json:"payload"`
 }
 
 var lrlogger = logrus.New()
@@ -49,6 +41,26 @@ func main() {
 	flag.StringVar(&socketPath, "socket", "/run/guest-services/backend.sock", "Unix domain socket to listen on")
 	flag.Parse()
 
+	ig := &IGWeb{
+		runtime: local.New(),
+	}
+	lrlogger.Fatal(ig.Run(socketPath))
+}
+
+func listen(path string) (net.Listener, error) {
+	return net.Listen("unix", path)
+}
+
+type GadgetStartRequest struct {
+	ID             string            `json:"id"`
+	GadgetName     string            `json:"gadgetName"`
+	GadgetCategory string            `json:"gadgetCategory"`
+	Params         map[string]string `json:"params"`
+	Timeout        int               `json:"timeout"`
+	LogLevel       int               `json:"logLevel"`
+}
+
+func (ig *IGWeb) Run(socketPath string) error {
 	_ = os.RemoveAll(socketPath)
 
 	lrlogger.SetOutput(os.Stdout)
@@ -75,33 +87,25 @@ func main() {
 	}
 	router.Listener = ln
 
-	ig := &IGWeb{
-		runtime: local.New(),
-	}
 	ig.runtime.Init(ig.runtime.ParamDescs().ToParams())
 	err = operators.GetAll().Init(operators.GlobalParamsCollection())
 	if err != nil {
 		log.Printf("error initializing operators: %v", err)
 	}
-	router.POST("/gadget", ig.runGagdet)
-
-	lrlogger.Fatal(router.Start(startURL))
+	router.POST("/gadget", ig.runGadgetHandler)
+	router.GET("/gadgets", ig.getCatalogHandler)
+	return router.Start(startURL)
 }
 
-func listen(path string) (net.Listener, error) {
-	return net.Listen("unix", path)
+func (ig *IGWeb) getCatalogHandler(ctx echo.Context) error {
+	catalog, err := ig.runtime.GetCatalog()
+	if err != nil {
+		return ctx.String(500, err.Error())
+	}
+	return ctx.JSON(200, catalog)
 }
 
-type GadgetStartRequest struct {
-	ID             string            `json:"id"`
-	GadgetName     string            `json:"gadgetName"`
-	GadgetCategory string            `json:"gadgetCategory"`
-	Params         map[string]string `json:"params"`
-	Timeout        int               `json:"timeout"`
-	LogLevel       int               `json:"logLevel"`
-}
-
-func (ig *IGWeb) runGagdet(ctx echo.Context) error {
+func (ig *IGWeb) runGadgetHandler(ctx echo.Context) error {
 	var request GadgetStartRequest
 	if err := ctx.Bind(&request); err != nil {
 		return ctx.String(500, err.Error())
@@ -124,7 +128,6 @@ func (ig *IGWeb) runGagdet(ctx echo.Context) error {
 	}
 
 	logger := logger.DefaultLogger()
-
 	parser := gadgetDesc.Parser()
 
 	runtimeParams := ig.runtime.ParamDescs().ToParams()
@@ -186,8 +189,4 @@ func (ig *IGWeb) runGagdet(ctx echo.Context) error {
 	output["events"] = events
 
 	return ctx.JSON(http.StatusOK, output)
-}
-
-type HTTPMessageBody struct {
-	Message string
 }
